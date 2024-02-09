@@ -57,16 +57,18 @@ TIMER2_RELOAD EQU ((65536-(CLK/TIMER2_RATE)))
 ;-----------;
 
 DSEG 
-FSM1_state: ds 1
-FSM2_state: ds 1
-Temp_soak: ds 1 ; 150 C
-Time_soak: ds 1 ; 60 - 120 sec
-Temp_refl: ds 1 ; 217 C
-Time_refl: ds 1 ; 45 - 75 sec
-Temp_cool: ds 1 ; 60 C
-pwm: ds 1
-sec: ds 1
-temp: ds 1
+FSM1_state: 	ds 1
+FSM2_state: 	ds 1
+Temp_soak: 		ds 1 ; 150 C
+Time_soak: 		ds 1 ; 60 - 120 sec
+Temp_refl: 		ds 1 ; 217 C
+Time_refl: 		ds 1 ; 45 - 75 sec
+Temp_cool: 		ds 1 ; 60 C
+Abort_max_time: ds 1 ; 60 sec
+Abort_min_temp: ds 1 ; 50 C
+pwm: 			ds 1
+sec: 			ds 1
+temp: 			ds 1
 
 ; idk if this is needed
 mov Temp_soak, #150
@@ -208,19 +210,19 @@ Inc_Done:
 	dseg at 30H
 	
 	;1000 ms have passed
-	mov A, SECONDS
+	mov A, sec
 	add A, #1
 	da A
-	mov SECONDS, A
-	cjne A, #0x60, Timer2_ISR_done
-	mov SECONDS, #0x00
+	mov sec, A
+	; cjne A, #0x60, Timer2_ISR_done
+	; mov SECONDS, #0x00
 
-	mov A, MINUTES
-	add A, #1
-	da A
-	mov MINUTES, A
-	cjne A, #0x60, Timer2_ISR_done
-	mov MINUTES, #0x00
+	; mov A, MINUTES
+	; add A, #1
+	; da A
+	; mov MINUTES, A
+	; cjne A, #0x60, Timer2_ISR_done
+	; mov MINUTES, #0x00
 
 Timer2_ISR_done:
 	pop psw
@@ -287,8 +289,21 @@ FSM1_state1: ; RAMP TO SOAK
     subb a, temp ; Temp_soak - temp
     jnc FSM1_state1_done ; if no carry (temp < Temp_soak), go to FSM2 
     mov FSM1_state, #2 ; if there is carry (temp > Temp_soak), go to next state
+FSM1_state1_abort_check:
+	mov a, Abort_min_temp 
+	clr c
+	subb a, temp ; Abort_min_temp - temp
+	jc FSM1_state1_done ; if carry (temp > Abort_min_temp), go to FSM1_state1_done
+	Abort_Time_Check: ;else check if time > 60s
+	mov a, Abort_max_time
+	clr c
+	subb a, sec ; Abort_max_time - sec
+	jnc FSM1_state1_done ;if not carry (sec < Abort_max_time), go to FSM1_state1_done, else abort
+	mov FSM1_state, #0 ; sets state to 0
+	ljmp FSM1_state0 ;jumps to state 0 immediately to abort
 FSM1_state1_done:
     ljmp FSM2
+
 
 FSM1_state2: ; SOAK 
     cjne a, #2, FSM1_state3
