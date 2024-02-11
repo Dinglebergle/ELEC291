@@ -2,6 +2,8 @@ $NOLIST
 $MODN76E003
 $LIST
 
+
+
 ;  N76E003 pinout:
 ;                               -------
 ;       PWM2/IC6/T0/AIN4/P0.5 -|1    20|- P0.4/AIN5/STADC/PWM3/IC3
@@ -16,8 +18,11 @@ $LIST
 ;            PWM5/IC7/SS/P1.5 -|10   11|- P1.4/SDA/FB/PWM1
 ;                               -------
 ;
+
+
 ORG 0x0000  ; Start address of the program
 ljmp main
+
 
 ; External interrupt 0 vector ***(not used in this code)
 org 0x0003
@@ -43,6 +48,28 @@ org 0x0023
 org 0x002B
 	ljmp Timer2_ISR
 
+temp_message:     db 'Temp:     C', 0
+time_message:     db 'Time:     s', 0
+mode_message:     db '           \'M:  ', 0
+state_message:    db            'S:  ', 0
+
+; Under here for testing of the FSM
+state0_message: db 'state 0', 0
+state1_message: db 'state 1', 0
+state2_message: db 'state 2', 0
+state3_message: db 'state 3', 0
+state4_message: db 'state 4', 0
+state5_message: db 'state 5', 0
+
+$NOLIST
+$include (LCD_4bit.inc)
+$LIST
+
+$NOLIST
+$include(math32.inc)
+$LIST
+
+
 CLK               EQU 16600000 ; Microcontroller system frequency in Hz
 BAUD              EQU 115200 ; Baud rate of UART in bps
 TIMER1_RELOAD     EQU (0x100-(CLK/(16*BAUD)))
@@ -56,7 +83,7 @@ TIMER2_RELOAD EQU ((65536-(CLK/TIMER2_RATE)))
 ; Variables ;
 ;-----------;
 
-DSEG 
+DSEG at 30H
 FSM1_state: 	ds 1
 FSM2_state: 	ds 1
 Temp_soak: 		ds 1 ; 150 C
@@ -66,23 +93,38 @@ Time_refl: 		ds 1 ; 45 - 75 sec
 Temp_cool: 		ds 1 ; 60 C
 Abort_max_time: ds 1 ; 60 sec
 Abort_min_temp: ds 1 ; 50 C
-pwm: 			ds 1
-sec: 			ds 1
+pwm: 			ds 1 ; pwm controller for the solid-state relay
+sec: 			ds 1 ; counter for
 temp: 			ds 1
+x: ds 4				  ; y variable used for 32-bit arithmetic (as seen in math32.inc)
+y: ds 4				  ; x variable used for 32-bit arithmetic (as seen in math32.inc)
+bcd: ds 5             ; BCD variable
+Count1ms: ds 2        ; Used to determine the passing of time (1 millisecond)
 
+
+bseg
+half_seconds_flag: dbit 1;
+mf: dbit 1
 ; idk if this is needed
-mov Temp_soak, #150
-mov Time_soak, #60
-mov Temp_refl, #217
-mov Time_refl, #45
+;mov Temp_soak, #150
+;mov Time_soak, #60
+;mov Temp_refl, #217
+;mov Time_refl, #45
 
-START_BUTTON equ P1.5
 
 ;                     1234567890123456    
-temp_message:     db 'Temp:     C', 0
-time_message:     db 'Time:     s', 0
-mode_message:     db '           'M:  ', 0
-state_message:    db            'S:  ', 0
+
+
+cseg
+START_BUTTON equ P1.5
+SOUND_OUT equ P1.2
+LCD_RS equ P1.3
+LCD_E  equ P1.4
+LCD_D4 equ P0.0
+LCD_D5 equ P0.1
+LCD_D6 equ P0.2
+LCD_D7 equ P0.3
+
 
 ;-------------------------------;
 ; Routine to initialize the ISR ;
@@ -197,7 +239,7 @@ Inc_Done:
 	mov Count1ms+0, a
 	mov Count1ms+1, a
 	; Increment the BCD counter
-	mov a, BCD_counter
+	mov a, bcd
 	;jnb UPDOWN, Timer2_ISR_decrement
 	add a, #0x01
 	;sjmp Timer2_ISR_da
@@ -207,8 +249,6 @@ Inc_Done:
  ;   ljmp Timer2_ISR_done
 
 ;continue_isr2:
-	dseg at 30H
-	
 	;1000 ms have passed
 	mov A, sec
 	add A, #1
@@ -242,11 +282,40 @@ Init_All:
 	mov	P0M1, #0x00
 	mov	P0M2, #0x00
 
+	orl CKCON, #0x10 ; CLK is the input for timer1
+	orl PCON, #0x80  ; /Bit SMOD = 1, double baud rate
+	mov SCON, #0x52
+	anl T3CON, #0b11011111
+	anl TMOD, #0x0f  ; Clear the configuration bits for timer 1
+	orl TMOD, #0x20  ; Timer 1 Mode 2
+	mov TH1, #TIMER1_RELOAD ; TH1 = TIMER1_RELOAD;
+	setb TR1
+	
+	; Using timer 0 for delay functions. Initialize here:
+	clr TR0 ; Stop timer 0
+	orl CKCON, #0x08 ; CLK is the input for timer 0
+	anl TMOD, #0XF0  ; Clear the configuration bits for timer 0
+	orl TMOD, #0x01  ; Timer 0 in Mode 1: 16-bit timer
+	
+	; Initialize the pins used by the ADC (P1.1, P1.7) as input.
+	orl	P1M1, #0b10000010
+	anl	P1M2, #0b01111101
+	
+	; Initialize and start the ADC:
+	anl ADCCON0, #0xF0
+	orl ADCCON0, #0x07 ; Select channel 7
+	; AINDIDS select if some pins are analog inputs or digital I/O:
+	mov AINDIDS, #0x00 ; Disable all analog inputs
+	orl AINDIDS, #0b10100001 ; Activate AIN0 and AIN7 analog inputs
+	orl ADCCON1, #0x01 ; Enable ADC
+	
     lcall Timer0_Init
     lcall Timer1_Init
     lcall Timer2_Init
     setb EA   ; Enable Global interrupts
     lcall LCD_4BIT
+	mov FSM1_state, #0
+ret
 
 ;-----------------------;
 ; FSM1 | REFLOW PROFILE ;
@@ -256,18 +325,18 @@ FSM1:
     mov a, FSM1_state
     Set_Cursor(1, 1)
     Send_Constant_String(#time_message)
-    Set_Cursor(2, 1)
-    Send_Constant_String(#temp_message)
+    ;Set_Cursor(2, 1)
+    ;Send_Constant_String(#temp_message)
     Set_Cursor(1, 14)
     Send_Constant_String(#mode_message)
     Set_Cursor(2, 13)
     Send_Constant_String(#state_message)
-    Set_Cursor(1, 7)
-    Display_BCD(sec)
-    Set_Cursor(2, 7)
-    Send_Constant_String(temp)
-    Set_Cursor(2, 15)
-    Display_BCD(FSM1_state)
+    ;Set_Cursor(1, 7)
+    ;Display_BCD(sec) ; This one currently screws LCD up
+    ;Set_Cursor(2, 7)
+    ;Send_Constant_String(#temp) ; This one also currently screws LCD up
+    ;Set_Cursor(2, 15)			 
+    ;Display_BCD(FSM1_state)     ; This one also currently screws LCD up
 
 FSM1_state0: ; DEFAULT/RESET
     cjne a, #0, FSM1_state1
@@ -277,11 +346,18 @@ FSM1_state0: ; DEFAULT/RESET
     jb START_BUTTON, FSM1_state0_done
     jnb START_BUTTON, $ ; Wait for key release
     mov FSM1_state, #1
+
+	Set_Cursor(2, 1)
+    Send_Constant_String(#state0_message)
 FSM1_state0_done:
     ljmp FSM2
 
 FSM1_state1: ; RAMP TO SOAK
-    cjne a, #1, FSM2_state2
+    cjne a, #1, FSM2_state2_jump
+    	sjmp FSM_state1_continue
+    FSM2_state2_jump:
+    	ljmp FSM2_state2
+    FSM_state1_continue:
     mov pwm, #100 ; power = 100%
     mov sec, #0
     mov a, Temp_soak
@@ -326,7 +402,7 @@ FSM1_state3: ; RAMP TO PEAK
     subb a, temp ; Temp_refl - temp
     jnc FSM1_state_3_done ; remain in state 3 if temp < Temp_refl
     mov FSM1_state, #4 ; go to state 4 if temp > Temp_refl
-FSM1_state3_done:
+FSM1_state_3_done:
     ljmp FSM2
 
 FSM1_state4: ; REFLOW
@@ -337,17 +413,17 @@ FSM1_state4: ; REFLOW
     subb a, sec ; Time_refl - sec
     jnc FSM1_state_4_done ; remain in state 4 if time < Time_refl
     mov FSM1_state, #5
-FSM1_state4_done:
+FSM1_state_4_done:
     ljmp FSM2
 
 FSM1_state5: ; COOLING
     mov pwm, #0 ; power = 0%
     mov a, Temp_cool
     clr c
-    sub a, temp ; Temp_cool - temp
+    subb a, temp ; Temp_cool - temp
     jc FSM1_state_5_done ; remain in state 5 if temp > Temp_cool
     mov FSM1_state, #0
-FSM1_state5_done:
+FSM1_state_5_done:
     ljmp FSM2
 
 ;-------------;
@@ -355,7 +431,7 @@ FSM1_state5_done:
 ;-------------;
 
 FSM2:
-    mov a, FSM2_state2
+    ; mov a, FSM2_state2 ; Commented out for testing
 FSM2_state0:
     cjne a, #0, FSM2_state1
     
@@ -391,6 +467,11 @@ FSM2_state4:
 ;-----------------------;
 
 main:
+	mov sp, #0x7f
     lcall Init_All ;calls what needs to initialized
+    lcall LCD_4BIT
     
+    
+Forever:
     ljmp FSM1 ;jumps to start of FSM1
+ljmp Forever
