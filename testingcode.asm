@@ -50,7 +50,7 @@ org 0x002B
 	ljmp Timer2_ISR
 
 ;                     1234567890123456    
-temptime_message: db '   C   :        ', 0  ; ____C 0:00
+temptime_message: db '   C            ', 0  ; ____C 0:00
 select_message:   db 's   ,   r   ,   ', 0  ; soak temp, time | reflow temp, time (time in s)
 
 state1_message:   db 'RAMP TO SOAK    ', 0  ; state 1
@@ -80,7 +80,7 @@ TIMER0_RATE    EQU 4096     ; 2048Hz squarewave (peak amplitude of CEM-1203 spea
 TIMER0_RELOAD  EQU ((65536-(CLK/TIMER0_RATE)))
 TIMER2_RATE    EQU 100      ; 100Hz or 10ms
 TIMER2_RELOAD       EQU (65536-(CLK/(16*TIMER2_RATE))) ; Need to change timer 2 input divide to 16 in T2MOD
-ABORT_MAX_TIME EQU 60
+ABORT_MAX_TIME EQU 0x10
 ABORT_MIN_TEMP EQU 50
 
 A_note EQU 4096 ;2048*2
@@ -98,16 +98,16 @@ G_note EQU 6700
 ;-----------;
 
 DSEG at 30H
-testing: ds 1
+abort_time: ds 1
+abort_temp: ds 1
+result: ds 4
+testing: 	ds 1
 FSM1_state: 	ds 1
 FSM2_state: 	ds 1
-Temp_soak_In:	ds 1
 Temp_soak: 		ds 2 ; 150 C 			;able to be programmed by user (Temp_soak_In + Adjust)
-Time_soak_In:	ds 1
 Time_soak: 		ds 2 ; 60 - 120 sec		;able to be programmed by user (Time_soak_In + Adjust)
-Temp_refl_In:   ds 1
 Temp_refl: 		ds 2 ; 217 C			;able to be programmed by user (Temp_refl_In + Adjust)
-Time_refl_In:   ds 1
+Temp_temporary: ds 2 ;
 Time_refl: 		ds 2 ; 45 - 75 sec		;able to be programmed by user (Time_refl_In + Adjust)
 Temp_cool: 		ds 1 ; 60 C
 pwm: 			ds 1 ; pwm controller for the solid-state relay
@@ -147,7 +147,6 @@ LCD_D5 		    equ P0.1 ;Pin 17
 LCD_D6          equ P0.2 ;Pin 18
 LCD_D7          equ P0.3 ;Pin 19
 PWM_OUT         EQU P1.0 ; Logic 1=oven on ;Pin 15
-
 
 ;-------------------------------;
 ; Routine to initialize the ISR ;
@@ -287,12 +286,23 @@ Timer2_ISR_done:
 ;------------------;
 ; Sounds Functions ; 
 ;------------------;
-;make sound , (time length in 10ms)
+;make sound , (note)time length in 10ms)
+
+;TIMER0_RATE    EQU 4096     ; 2048Hz squarewave (peak amplitude of CEM-1203 speaker)
+;TIMER0_RELOAD  EQU ((65536-(CLK/TIMER0_RATE)))
 Make_sound MAC
 	;mov TIMER0_RELOAD, %0 
 	mov sound_length, %0
 	mov noise_counter, #0
 	setb makenoise
+	; mov sound_note, %0
+	; Load_x(CLK)
+	; Load_y(sound_note)
+	; lcall div32
+	; mov y, x
+	; Load_x(65536)
+	; lcall sub32
+	; mov TIMER0_RELOAD
 ENDMAC
 
 ;-------------------------;
@@ -342,7 +352,6 @@ lcall putchar
 pop acc
 ret
 
-
 ; We can display a number any way we want.  In this case with
 ; four decimal places. 
 Display_formated_BCD: ;need to edit where and how this code is placed
@@ -356,8 +365,8 @@ Display_formated_BCD: ;need to edit where and how this code is placed
 	
 Display_formated_BCD3:
 	Set_Cursor(1, 2)
-	Display_BCD(bcd+1)
-	Display_BCD(bcd+0)
+	Display_BCD(bcd+3)
+	Display_BCD(bcd+2)
 	ret
 
 Read_ADC_thermocouple:
@@ -458,6 +467,7 @@ Read_ADC_thermocouple:
 
 	Load_y(316)	; Load the gain of the op amp here
 	lcall div32
+    
 
 	mov y+0, BCD_335+0
 	mov y+1, BCD_335+1
@@ -465,14 +475,31 @@ Read_ADC_thermocouple:
 	mov y+3, BCD_335+3
 	
 	lcall add32
-	; Convert to BCD and display
-	mov bcd + 0, x + 0
-	mov bcd + 1, x + 1
-	mov bcd + 2, x + 2
-	mov bcd + 3, x + 3
+
+    Load_y(10000)	;divid by 100
+	lcall div32
+    ;Load_y(100)	;divid by 100
+	;lcall div32
+
+	mov result+0, x+0
+	mov result+1, x+1
+	mov result+2, x+2
+	mov result+3, x+3
+
+    ;Convert to BCD and display
 	lcall hex2bcd
-	lcall Display_formated_BCD
+	;lcall Display_formated_BCD
 	
+
+	;Set_Cursor(2,1)
+    mov a, result+0
+	Set_Cursor(2,1)
+
+	lcall SendToLCD
+
+
+
+
 	pop AR5
 	pop AR3
 	pop AR2
@@ -635,7 +662,6 @@ Read_ADC_joystick:
 	mov R2, joystick_VRy
 	Wait_Milli_seconds(#100)
 ret
-; Send eight bit number via serial port, passed in ’a’.
 SendToSerialPort:
 	mov b, #100
 	div ab
@@ -651,7 +677,7 @@ SendToSerialPort:
 	lcall putchar ; Send to PuTTY/Python/Matlab
 ret
 
-; Eight bit number to display passed in ’a’.
+; Eight bit number to display passed in â€™aâ€™.
 ; Sends result to LCD
 SendToLCD:
 	mov b, #100
@@ -667,6 +693,7 @@ SendToLCD:
 	orl a, #0x30 ; Convert units to ASCII
 	lcall ?WriteData; Send to LCD
 ret
+
 ;----------------;
 ; Initialization ; 
 ;----------------;
@@ -718,11 +745,13 @@ Init_All:
 	setb EA   ; Enable Global interrupts ;Could be source of error? since timer 1 doesnt need interrupts
     setb state_changed
 	mov sec, #0x00
-	mov Temp_soak_In, #100
-	mov Time_soak, #60
-	mov Temp_refl, #180
-	mov Time_refl, #45
-	;mov temp, #0x10
+	mov Temp_soak, #120
+	mov Time_soak, #60 ; set to 60 after testing
+	mov Temp_refl, #200
+	mov Time_refl, #45 ; set to 45 after testing
+	mov Temp_cool, #50
+	mov abort_temp, #50
+	mov abort_time, #10
 	mov FSM1_state, #0x00
 	mov FSM2_state, #0x00
 	mov menu_state, #0x00
@@ -745,7 +774,7 @@ over_FSM1_state0_long:
 
  
 jnb state_changed, FSM1_state0_not_changed
-	;mov sec, #0
+	mov sec, #0
 	setb TR0
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
@@ -781,6 +810,7 @@ FSM1_state0_not_changed:
 	Set_Cursor(1, 14)
 	mov a, Time_refl
 	lcall SendToLCD
+		
 		
 	; variable setting
     mov pwm, #0x00 ; power
@@ -864,6 +894,7 @@ FSM1_state0_not_changed:
 		; Block to check VRy for increment and decrement
 		cjne R2, #2, state0_not_up
 			inc Temp_soak
+			; subb Temp_soak
 			ljmp state0_menu_done
 			soak_time_adjust_label: ljmp soak_time_adjust	
 		state0_not_up:
@@ -924,10 +955,7 @@ FSM1_state0_not_changed:
 		state3_menu_done:
 	
 	end_menu_fsm:
-	
-	
-	
-	
+		
 	; button pressing
     jb START_BUTTON, FSM1_state0_done
     Wait_Milli_Seconds(#50) ; debounce delay
@@ -972,19 +1000,32 @@ FSM1_state1_not_changed:
 	;variables
     mov pwm, #100 ; power = 100%
 	setb oven_on	; keep power to ssr on 
-    mov a, Temp_soak
+
+    ;mov y+0, Temp_soak
+    ;mov y+1, 
+
+	;mov bcd+4, temp+4
+	;mov bcd+3, temp+3
+	;mov bcd+2, temp+2
+	;mov bcd+1, temp+1
+	;mov bcd+0, temp+0
+
+	;lcall bcd2hex
+    
+	mov a, Temp_soak
     clr c
-    subb a, temp ; Temp_soak - temp
+    subb a, result+0 ; Temp_soak - temp
+
     jnc FSM1_state1_done ; if no carry (temp < Temp_soak), go to FSM2 
 	setb state_changed ;tells us the state was just changed :)
     mov FSM1_state, #2 ; if there is carry (temp > Temp_soak), go to next state
 FSM1_state1_abort_check:
-	mov a, #ABORT_MIN_TEMP
+	mov a, abort_temp
 	clr c
-	subb a, temp ; Abort_min_temp - temp
+	subb a, result+0 ; Abort_min_temp - temp
 	jc FSM1_state1_done ; if carry (temp > Abort_min_temp), go to FSM1_state1_done
 Abort_Time_Check: ;else check if time > 60s
-	mov a, #ABORT_MAX_TIME
+	mov a, abort_time
 	clr c
 	subb a, sec ; Abort_max_time - sec
 	jnc FSM1_state1_done ;if not carry (sec < Abort_max_time), go to FSM1_state1_done, else abort
@@ -1045,11 +1086,10 @@ FSM1_state3: ; RAMP TO PEAK
 FSM1_state3_not_changed:
     mov pwm, #100 ; power = 100%
 	setb oven_on
-    mov sec, #0
 
     mov a, Temp_refl
     clr c
-    subb a, temp ; Temp_refl - temp
+    subb a, result+0 ; Temp_refl - temp
     jnc FSM1_state_3_done ; remain in state 3 if temp < Temp_refl
 	setb state_changed ; tells us state is changing
     mov FSM1_state, #4 ; go to state 4 if temp > Temp_refl
@@ -1109,64 +1149,61 @@ FSM1_state5_not_changed:
 	clr oven_on
     mov a, Temp_cool
     clr c
-    subb a, temp ; Temp_cool - temp
+    subb a, result+0 ; Temp_cool - temp
     jc FSM1_state_5_done ; remain in state 5 if temp > Temp_cool
     setb state_changed
 	mov FSM1_state, #0
-
+	ljmp finished
 FSM1_state_5_done:
-    setb TR0
+	ljmp FSM2
+
+finished:
+	Set_Cursor(1, 1)
+    Send_Constant_String(#safe_message)
+	setb TR0
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	clr TR0
-	ljmp finished
 
-finished:
-	Set_Cursor(1, 1)
-    Send_Constant_String(#safe_message)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
+	jb START_BUTTON, NOT_DONE
+    Wait_Milli_Seconds(#50) ; debounce delay
+    jb START_BUTTON, NOT_DONE
+    jnb START_BUTTON, $ ; Wait for key release
+
 	ljmp FSM2
+
+NOT_DONE:
+	ljmp finished
 
 ;--------------;
 ; FSM2 | POWER ;
 ;--------------;
 
 FSM2:
-	;TESTING
-	;mov a, sec
-	;da A
-	;mov sec, a
 	Set_Cursor(2,15)
 	Display_BCD(sec)
 
-	;mov a, sec
-	;Set_Cursor(2,15)
-	;Display_BCD(pwm_counter)
-
-	;Set_Cursor(2,1)
-	;Set_Cursor(2, 2)
-	;Display_BCD(bcd+2)
-	;Display_BCD(bcd+1)
-	;Set_Cursor(2, 4)
-	;Display_BCD(bcd+1)
-	;Set_Cursor(2, 4)
-	;Display_char(#'.')
-	;Set_Cursor(2, 6)
-	;Display_BCD(bcd+0)
-	
-	;Send_BCD(temp+2)
-    ;Send_BCD(temp+1)
-    ;Send_BCD(temp+0)
-	
-	
+	;Set_Cursor(2,12)
 	;Display_BCD(temp)
+
+
+	mov a, FSM1_state
+	cjne a, #0, abort_button
+	sjmp Skip_abort_button_pressed
+
+abort_button:
+	; button pressing
+    jb START_BUTTON, Skip_abort_button_pressed
+    Wait_Milli_Seconds(#50) ; debounce delay
+    jb START_BUTTON, Skip_abort_button_pressed
+    jnb START_BUTTON, $ ; Wait for key release
+
+	setb state_changed
+	mov FSM1_state, #0
+	
+Skip_abort_button_pressed:
 	 ljmp FSM1 ; TESTING
 
 
