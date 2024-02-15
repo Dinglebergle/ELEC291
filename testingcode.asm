@@ -58,8 +58,8 @@ state2_message:   db 'PREHEAT/SOAK    ', 0  ; state 2
 state3_message:   db 'RAMP TO PEAK    ', 0  ; state 3
 state4_message:   db 'REFLOW...       ', 0  ; state 4
 state5_message:   db 'COOLING...      ', 0  ; state 5
-unsafe_message:	  db 'DO NOT TOUCH    ', 0  ; post state 5
-safe_message:     db 'SAFE TO TOUCH   ', 0  ; post state 5
+unsafe_message:	  db 'DO NOT OPEN     ', 0  ; post state 5
+safe_message:     db 'SAFE TO OPEN    ', 0  ; post state 5
 newline_char: db '\r','\n', 0
 dot_char: db '.', 0
 
@@ -101,10 +101,14 @@ DSEG at 30H
 testing: ds 1
 FSM1_state: 	ds 1
 FSM2_state: 	ds 1
-Temp_soak: 		ds 1 ; 150 C 			;able to be programmed by user
-Time_soak: 		ds 1 ; 60 - 120 sec		;able to be programmed by user
-Temp_refl: 		ds 1 ; 217 C			;able to be programmed by user
-Time_refl: 		ds 1 ; 45 - 75 sec		;able to be programmed by user
+Temp_soak_In:	ds 1
+Temp_soak: 		ds 2 ; 150 C 			;able to be programmed by user (Temp_soak_In + Adjust)
+Time_soak_In:	ds 1
+Time_soak: 		ds 2 ; 60 - 120 sec		;able to be programmed by user (Time_soak_In + Adjust)
+Temp_refl_In:   ds 1
+Temp_refl: 		ds 2 ; 217 C			;able to be programmed by user (Temp_refl_In + Adjust)
+Time_refl_In:   ds 1
+Time_refl: 		ds 2 ; 45 - 75 sec		;able to be programmed by user (Time_refl_In + Adjust)
 Temp_cool: 		ds 1 ; 60 C
 pwm: 			ds 1 ; pwm controller for the solid-state relay
 sec: 			ds 1 ; counter for
@@ -133,9 +137,6 @@ state_changed:  dbit 1
 makenoise: 		dbit 1
 oven_on: 		dbit 1	; flag to indicate ssr on/off 
 
-
-
-
 cseg
 START_BUTTON    equ P1.5 ;Pin 10
 SOUND_OUT 	    equ P1.2 ;Pin 13
@@ -146,6 +147,7 @@ LCD_D5 		    equ P0.1 ;Pin 17
 LCD_D6          equ P0.2 ;Pin 18
 LCD_D7          equ P0.3 ;Pin 19
 PWM_OUT         EQU P1.0 ; Logic 1=oven on ;Pin 15
+
 
 ;-------------------------------;
 ; Routine to initialize the ISR ;
@@ -238,7 +240,6 @@ Timer2_ISR:
 	push psw
 	push acc
 	
-
 jnb oven_on, NO_OVEN ;controlling whether oven is on or not
 	mov a, pwm_counter
 	add a, #0x01
@@ -291,7 +292,7 @@ Make_sound MAC
 	;mov TIMER0_RELOAD, %0 
 	mov sound_length, %0
 	mov noise_counter, #0
-	setb makenoisemakke
+	setb makenoise
 ENDMAC
 
 ;-------------------------;
@@ -341,6 +342,7 @@ lcall putchar
 pop acc
 ret
 
+
 ; We can display a number any way we want.  In this case with
 ; four decimal places. 
 Display_formated_BCD: ;need to edit where and how this code is placed
@@ -351,13 +353,19 @@ Display_formated_BCD: ;need to edit where and how this code is placed
 	Display_BCD(bcd+1)
 	Display_BCD(bcd+0)
 	ret 
-
-
-
+	
+Display_formated_BCD3:
+	Set_Cursor(1, 2)
+	Display_BCD(bcd+1)
+	Display_BCD(bcd+0)
+	ret
 
 Read_ADC_thermocouple:
 	push AR0 
 	push AR1
+	push AR2 
+	push AR3
+	push AR5
 	; Read the 2.08V LED voltage connected to AIN0 on pin 6
 	anl ADCCON0, #0xF0
 	orl ADCCON0, #0x00 ; Select channel 0
@@ -370,12 +378,29 @@ Read_ADC_thermocouple:
 	; Read the signal connected to AIN7 for the LM 335
 	anl ADCCON0, #0xF0
 	orl ADCCON0, #0x07 ; Select channel 7
-	lcall Read_ADC
-    
-    ; Convert to voltage
+
+    ;lcall Read_ADC
+	;averages noisy measurements
+    Average_ADC_LM335:
+		Load_x(0)
+		mov r5, #100
+	Sum_loop_LM335:
+		lcall Read_ADC
+		mov y+3, #0
+		mov y+2, #0
+		mov y+1, R3
+		mov y+0, R2 
+		lcall add32
+		djnz R5, Sum_loop_LM335
+		
+		mov x+0, x+1
+		mov x+1, x+2
+		mov x+2, x+3
+		mov x+3, #0
+		
+	; Pad other bits with zero
 	mov x+0, R0
 	mov x+1, R1
-	; Pad other bits with zero
 	mov x+2, #0
 	mov x+3, #0
 	Load_y(20556) ; The MEASURED LED voltage: 2.074V, with 4 decimal places
@@ -389,7 +414,6 @@ Read_ADC_thermocouple:
 	mov y+3, #0
 	lcall div32
 
-	
 	Load_y(27300)
 	lcall sub32
 	
@@ -448,6 +472,10 @@ Read_ADC_thermocouple:
 	mov bcd + 3, x + 3
 	lcall hex2bcd
 	lcall Display_formated_BCD
+	
+	pop AR5
+	pop AR3
+	pop AR2
 	pop AR1
 	pop AR0
 
@@ -484,18 +512,15 @@ Read_ADC:
 ; A reading of V_out < 0.3V is down for VRy, or     ;
 ; left for VRx.                                     ;
 ;                                                   ;
-;                                                   ;
-;     GND|                                       [UP, joystick_VRy = 2]                             
-;     +5V|                                              
+;-----------------------------------------------------------------------------------------------------------------------;
+;     GND|                                       [UP, joystick_VRy = 2]                             					;
+;     +5V|                                              																;
 ;     VRx|  [LEFT, joystick_VRx = 0]      [NEUTRAL, joystick_VRx, joystick_VRy = 1]           [RIGHT, joystick_VRx = 2] ;
-;     VRy|                                              
-;     SW |                                       [DOWN, joystick_VRy = 0]
-;---------------------------------------------------;
+;     VRy|                                              																;
+;     SW |                                       [DOWN, joystick_VRy = 0]												;
+;-----------------------------------------------------------------------------------------------------------------------;
 ; lcall Read_ADC_joystick
-; 
-;
-;
-;
+
 Read_ADC_joystick:
 
 	; Read the 2.08V LED voltage connected to AIN0 on pin 6
@@ -510,6 +535,8 @@ Read_ADC_joystick:
 	; Read the signal connected to AIN4
 	anl ADCCON0, #0xF0
 	orl ADCCON0, #0x04 ; Select channel 4
+
+	; averages noisy measurements
 	Average_ADC_x:
 		Load_x(0)
 		mov R5, #255
@@ -559,6 +586,7 @@ Read_ADC_joystick:
 	anl ADCCON0, #0xF0
 	orl ADCCON0, #0x01 ; Select channel 1
 	
+	; averages noisy measurements
 	Average_ADC_y:
 		Load_x(0)
 		mov R5, #255
@@ -585,7 +613,6 @@ Read_ADC_joystick:
 ;	mov x+2, #0
 ;	mov x+3, #
 	
-	
 	Load_y(200)
 	clr mf
 	
@@ -608,7 +635,38 @@ Read_ADC_joystick:
 	mov R2, joystick_VRy
 	Wait_Milli_seconds(#100)
 ret
+; Send eight bit number via serial port, passed in ’a’.
+SendToSerialPort:
+	mov b, #100
+	div ab
+	orl a, #0x30 ; Convert hundreds to ASCII
+	lcall putchar ; Send to PuTTY/Python/Matlab
+	mov a, b ; Remainder is in register b
+	mov b, #10
+	div ab
+	orl a, #0x30 ; Convert tens to ASCII
+	lcall putchar ; Send to PuTTY/Python/Matlab
+	mov a, b
+	orl a, #0x30 ; Convert units to ASCII
+	lcall putchar ; Send to PuTTY/Python/Matlab
+ret
 
+; Eight bit number to display passed in ’a’.
+; Sends result to LCD
+SendToLCD:
+	mov b, #100
+	div ab
+	orl a, #0x30 ; Convert hundreds to ASCII
+	lcall ?WriteData ; Send to LCD
+	mov a, b ; Remainder is in register b
+	mov b, #10
+	div ab
+	orl a, #0x30 ; Convert tens to ASCII
+	lcall ?WriteData; Send to LCD
+	mov a, b
+	orl a, #0x30 ; Convert units to ASCII
+	lcall ?WriteData; Send to LCD
+ret
 ;----------------;
 ; Initialization ; 
 ;----------------;
@@ -660,10 +718,10 @@ Init_All:
 	setb EA   ; Enable Global interrupts ;Could be source of error? since timer 1 doesnt need interrupts
     setb state_changed
 	mov sec, #0x00
-	mov Temp_soak, #0x05
-	mov Time_soak, #0x10
-	mov Temp_refl, #0x90
-	mov Time_refl, #0x24
+	mov Temp_soak_In, #100
+	mov Time_soak, #60
+	mov Temp_refl, #180
+	mov Time_refl, #45
 	;mov temp, #0x10
 	mov FSM1_state, #0x00
 	mov FSM2_state, #0x00
@@ -688,6 +746,12 @@ over_FSM1_state0_long:
  
 jnb state_changed, FSM1_state0_not_changed
 	;mov sec, #0
+	setb TR0
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	clr TR0
 	clr state_changed
 	Set_Cursor(1, 1)
     Send_Constant_String(#select_message)
@@ -702,14 +766,21 @@ FSM1_state0_not_changed:
 	;Set_Cursor(1, 2)
 	;Display_BCD(testing) ;TESTING END
 	Set_Cursor(1, 2)
-	Display_BCD(Temp_soak)
+	mov a, Temp_soak
+	lcall SendToLCD
+	;Wait_Milli_Seconds(#100)
+
 	Set_Cursor(1, 6)
-	Display_BCD(Time_soak)
+	mov a, Time_soak
+	lcall SendToLCD
+	
 	Set_Cursor(1, 10)
-	Display_BCD(Temp_refl)
+	mov a, Temp_refl
+	lcall SendToLCD
+	
 	Set_Cursor(1, 14)
-	Display_BCD(Time_refl)
-    Set_Cursor(1, 1)
+	mov a, Time_refl
+	lcall SendToLCD
 		
 	; variable setting
     mov pwm, #0x00 ; power
@@ -720,50 +791,85 @@ FSM1_state0_not_changed:
 	; VRx is stored in R1
 	; VRy is stored in R2
 	mov R0, menu_state
+	cjne R1, #2, skip_change_menu_state_right
+	ljmp change_menu_state_right
+	skip_change_menu_state_right:
 	
+	cjne R1, #0, skip_change_menu_state_left
+	ljmp change_menu_state_left
+	skip_change_menu_state_left:
+	ljmp soak_temp_adjust
+
+	change_menu_state_right:
+		cjne R0, #3, change_menu_state_right0
+		ljmp move_menu_0
+		change_menu_state_right0:
+		
+		cjne R0, #0, change_menu_state_right1
+		ljmp move_menu_1
+		
+		change_menu_state_right1:
+		cjne R0, #1, change_menu_state_right2
+		ljmp move_menu_2
+		
+		change_menu_state_right2:
+		cjne R0, #2, end_menu_fsm_jumpy
+		ljmp move_menu_3
+		
+		end_menu_fsm_jumpy:
+			ljmp end_menu_fsm
+	
+	change_menu_state_left:
+		cjne R0, #3, change_menu_state_left0
+		ljmp move_menu_2
+		change_menu_state_left0:
+		
+		cjne R0, #0, change_menu_state_left1
+		ljmp move_menu_3
+		
+		change_menu_state_left1:
+		cjne R0, #1, change_menu_state_left2
+		ljmp move_menu_0
+		
+		change_menu_state_left2:
+		cjne R0, #2, end_menu_fsm_jumpy2
+		ljmp move_menu_1
+		
+		end_menu_fsm_jumpy2:
+			ljmp end_menu_fsm
+
+	move_menu_0:
+		mov menu_state, #0
+		Wait_Milli_Seconds(#250)
+		Wait_Milli_Seconds(#250)
+		ljmp end_menu_fsm
+	move_menu_1: 
+		mov menu_state, #1
+		Wait_Milli_Seconds(#250)
+		Wait_Milli_Seconds(#250)
+		ljmp end_menu_fsm
+	move_menu_2:
+		mov menu_state, #2
+		Wait_Milli_Seconds(#250)
+		Wait_Milli_Seconds(#250)
+		ljmp end_menu_fsm
+	move_menu_3:
+		mov menu_state, #3
+		Wait_Milli_Seconds(#250)
+		Wait_Milli_Seconds(#250)
+		ljmp end_menu_fsm
+		
 	soak_temp_adjust: ; State 0 that changes soak temp
 		cjne R0, #0, soak_time_adjust_label ; Jumps to soak_time if the menu state is not the current one
 		; Block to check VRy for increment and decrement
 		cjne R2, #2, state0_not_up
-			inc Temp_soak ; if we don't jump, we can increment
-			mov a, Temp_soak
-			da a
-			mov Temp_soak, a
-			Set_Cursor(1, 2)
-			Display_BCD(Temp_soak)
-			;state0_up_check_hold:
-			;	lcall Read_ADC_joystick
-			;	cjne R2, #2, state0_menu_done
-			;	dec R3
-			;	inc Temp_soak ; if we don't jump, we can increment
-			;	mov a, Temp_soak
-			;	da a
-			;	mov Temp_soak, a
-			;	Set_Cursor(1, 2)
-			;	Display_BCD(Temp_soak)
-			;	Wait_Milli_seconds(#200)
-				;cjne R3, #0, state0_up_check_hold
-				;state0_up_held:
-				;	lcall Read_ADC_joystick
-				;	cjne R2, #2, state0_menu_done
-				;	mov a, Temp_soak
-				;	add a, #10 ; if we don't jump, we can increment
-				;	da a
-				;	mov Temp_soak, a
-				;	Set_Cursor(1, 2)
-				;	Display_BCD(Temp_soak)
-				;	Wait_Milli_seconds(#200)
-				;sjmp state0_up_held
-					
+			inc Temp_soak
 			ljmp state0_menu_done
 			soak_time_adjust_label: ljmp soak_time_adjust	
 		state0_not_up:
 		mov R2, joystick_VRy
 		cjne R2, #0, state0_menu_done ; finishes if we don't have 0 in R2
-			mov a, Temp_soak
-			add a, #0x99 ; if we don't jump we can decrement
-			da a
-			mov Temp_soak, a
+			dec Temp_soak
 			ljmp state0_menu_done
 
 		state0_menu_done:
@@ -774,19 +880,14 @@ FSM1_state0_not_changed:
 		
 		; Block to check VRy for increment and decrement
 		cjne R2, #2, state1_not_up
-			inc Time_soak ; if we don't jump, we can increment
-			mov a, Temp_soak
-			da a
-			mov Time_soak, a
-			ljmp state1_menu_done	
+			;inc Time_soak ; if we don't jump, we can increment
+			inc Time_soak
+			ljmp state1_menu_done
+
 		state1_not_up:
 		mov R2, joystick_VRy
 		cjne R2, #0, state1_menu_done ; finishes if we don't have 0 in R2
-			mov a, Time_soak
-			add a, #0x99 ; if we don't jump we can decrement
-			da a
-			mov Time_soak, a
-		
+			dec Time_soak
 		state1_menu_done:	
 		ljmp end_menu_fsm
 		
@@ -795,21 +896,15 @@ FSM1_state0_not_changed:
 
 		; Block to check VRy for increment and decrement
 		cjne R2, #2, state2_not_up
-			inc temp_refl ; if we don't jump, we can increment
-			mov a, temp_refl
-			da a
-			mov temp_refl, a
-			ljmp state2_menu_done	
+		; inc temp_refl ; if we don't jump, we can increment
+			inc temp_refl
+
 		state2_not_up:
 		mov R2, joystick_VRy
 		cjne R2, #0, state2_menu_done ; finishes if we don't have 0 in R2
-			mov a, temp_refl
-			add a, #0x99 ; if we don't jump we can decrement
-			da a
-			mov temp_refl, a
+			dec temp_refl
 		state2_menu_done:
-		
-		
+
 		ljmp end_menu_fsm
 		
 	ramp_time_adjust: ; State 3 that changes ramp time
@@ -817,18 +912,15 @@ FSM1_state0_not_changed:
 		
 		; Block to check VRy for increment and decrement
 		cjne R2, #2, state3_not_up
-			inc time_refl ; if we don't jump, we can increment
-			mov a, time_refl
-			da a
-			mov time_refl, a
+		;	inc time_refl ; if we don't jump, we can increment
+			inc time_refl
+		
+			; no need for adjustment value bc 45 - 75 range < 100
 			ljmp state3_menu_done	
 		state3_not_up:
 		mov R2, joystick_VRy
 		cjne R2, #0, state3_menu_done ; finishes if we don't have 0 in R2
-			mov a, time_refl
-			add a, #0x99 ; if we don't jump we can decrement
-			da a
-			mov time_refl, a
+			dec time_refl
 		state3_menu_done:
 	
 	end_menu_fsm:
@@ -846,7 +938,8 @@ FSM1_state0_not_changed:
 	setb state_changed ; tells us the state was just changed
     
 	; change state, then play sound
-	mov FSM1_state, #1	
+	mov FSM1_state, #1
+		
 	
 FSM1_state0_done:
 	ljmp FSM2
@@ -854,13 +947,7 @@ FSM1_state0_done:
 FSM1_state1: ; RAMP TO SOAK
 	cjne a, #1, FSM1_state2_jump ; jump to intermediate
 
-	setb TR0
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	clr TR0
-
+	
 	; display for state 1
 	Set_Cursor(1, 1)
     Send_Constant_String(#state1_message)
@@ -873,6 +960,12 @@ FSM_state1_continue:
 	; sets secs to 0 if we have just changed state
 	jnb state_changed, FSM1_state1_not_changed
 	mov sec, #0
+	setb TR0
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	clr TR0
 	clr state_changed
 FSM1_state1_not_changed:
 
@@ -895,6 +988,7 @@ Abort_Time_Check: ;else check if time > 60s
 	clr c
 	subb a, sec ; Abort_max_time - sec
 	jnc FSM1_state1_done ;if not carry (sec < Abort_max_time), go to FSM1_state1_done, else abort
+	setb state_changed
 	mov FSM1_state, #0 ; sets state to 0 if 60s has passed
 	ljmp FSM1_state0 ;jumps to state 0 immediately to abort
 FSM1_state1_done:
@@ -903,19 +997,18 @@ FSM1_state1_done:
 FSM1_state2: ; SOAK 
     cjne a, #2, FSM1_state3
 
-	setb TR0
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	clr TR0
-
 	; display for state 2
 	Set_Cursor(1, 1)
     Send_Constant_String(#state2_message)
 	; sets secs to 0 if we have just changed state
 	jnb state_changed, FSM1_state2_not_changed
 	mov sec, #0
+	setb TR0
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	clr TR0
 	clr state_changed
 
 FSM1_state2_not_changed:
@@ -933,12 +1026,7 @@ FSM1_state2_done:
 FSM1_state3: ; RAMP TO PEAK
     cjne a, #3, FSM1_state4
 
-	setb TR0
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	clr TR0
+
 
 	; display for state 3
 	Set_Cursor(1, 1)
@@ -946,6 +1034,12 @@ FSM1_state3: ; RAMP TO PEAK
 	; sets secs to 0 if we have just changed state
 	jnb state_changed, FSM1_state3_not_changed
 	mov sec, #0
+	setb TR0
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	clr TR0
 	clr state_changed
 
 FSM1_state3_not_changed:
@@ -965,12 +1059,7 @@ FSM1_state_3_done:
 FSM1_state4: ; REFLOW
     cjne a, #4, FSM1_state5
 
-	setb TR0
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	Wait_Milli_Seconds(#50)
-	clr TR0
+	
 
 	; display for state 4
 	Set_Cursor(1, 1)
@@ -979,6 +1068,12 @@ FSM1_state4: ; REFLOW
 	; sets secs to 0 if we have just changed state
 	jnb state_changed, FSM1_state4_not_changed
 	mov sec, #0
+	setb TR0
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	clr TR0
 	clr state_changed
 
 FSM1_state4_not_changed:
@@ -995,12 +1090,18 @@ FSM1_state_4_done:
     ljmp FSM2
 
 FSM1_state5: ; COOLING
-    setb TR0
+    	
+	jnb state_changed, FSM1_state5_not_changed
+	mov sec, #0
+	setb TR0
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	clr TR0
+	clr state_changed
+
+FSM1_state5_not_changed:
 	
 	Set_Cursor(1, 1)
     Send_Constant_String(#state5_message)
@@ -1010,7 +1111,8 @@ FSM1_state5: ; COOLING
     clr c
     subb a, temp ; Temp_cool - temp
     jc FSM1_state_5_done ; remain in state 5 if temp > Temp_cool
-    mov FSM1_state, #0
+    setb state_changed
+	mov FSM1_state, #0
 
 FSM1_state_5_done:
     setb TR0
@@ -1019,6 +1121,17 @@ FSM1_state_5_done:
 	Wait_Milli_Seconds(#50)
 	Wait_Milli_Seconds(#50)
 	clr TR0
+	ljmp finished
+
+finished:
+	Set_Cursor(1, 1)
+    Send_Constant_String(#safe_message)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
 	ljmp FSM2
 
 ;--------------;
@@ -1027,18 +1140,15 @@ FSM1_state_5_done:
 
 FSM2:
 	;TESTING
-	mov a, sec
+	;mov a, sec
 	;da A
 	;mov sec, a
-	;Set_Cursor(2,10)
-	;Display_BCD(sec)
+	Set_Cursor(2,15)
+	Display_BCD(sec)
 
-	mov a, sec
+	;mov a, sec
 	;Set_Cursor(2,15)
 	;Display_BCD(pwm_counter)
-
-
-
 
 	;Set_Cursor(2,1)
 	;Set_Cursor(2, 2)
@@ -1103,12 +1213,14 @@ main:
     lcall LCD_4BIT
 	; 'default' values that are programmable by incrementing
 	; or decrementing using pushbuttons
-	;setb TR0
-	;Wait_Milli_Seconds(#50)
-	;Wait_Milli_Seconds(#50)
-	;Wait_Milli_Seconds(#50)
-	;Wait_Milli_Seconds(#50)
-	;clr TR0
+	
+	; sound for testing
+	setb TR0
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	Wait_Milli_Seconds(#50)
+	clr TR0
 Forever:
 	
 	;sjmp main
